@@ -13,8 +13,8 @@ public class BussinessObject {
     private ClassDescriptor[] classDescriptors;
 
 
-    public void setUri(String uri) {
-        this.$uri = uri;
+    public String setUri(String uri) {
+        return this.$uri = uri;
     }
 
     public String getUri() {
