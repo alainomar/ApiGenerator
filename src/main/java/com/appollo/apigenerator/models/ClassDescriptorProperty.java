@@ -10,12 +10,14 @@ import lombok.*;
 @NoArgsConstructor
 public class ClassDescriptorProperty {
     private String type;
-    private Integer order;
+    private int order;
 
     public ClassDescriptorProperty(Schema value, int order) {
-        this.type = "ref";
-        if(value.getType() != null){
-            this.type = "string";
+
+        if(value.get$ref() != null){
+            this.type = "ref";
+        } else {
+            this.type = value.getType();
         }
         this.order = order;
     }

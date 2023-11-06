@@ -1,44 +1,81 @@
 package com.appollo.apigenerator.controllers;
 
-import com.appollo.apigenerator.models.BussinessObject;
+import com.appollo.apigenerator.models.BusinessObject;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.swagger.v3.oas.annotations.tags.Tags;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
+import io.swagger.v3.oas.models.callbacks.Callback;
 import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.parameters.Parameter;
+import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
-import io.swagger.v3.oas.models.tags.Tag;
 import io.swagger.v3.parser.OpenAPIV3Parser;
-import io.swagger.v3.parser.reference.Reference;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.RequestBody;
+
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.util.Collection;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @RestController
 @RequestMapping("/generator")
 public class Generator {
 
     public Map<String, Map<String, Integer>> mapRefPath = new HashMap<>();
+    public Map<String, Map<String, Integer>> mapDefRefPath = new HashMap<>();
+    public Map<String, BusinessObject> businessObjects = new HashMap<String, BusinessObject>();
+    public Map<String, BusinessObject> definitionObjects = new HashMap<String, BusinessObject>();
 
-    public void addRefPath(String ref, String path){
+    public String getBOMPath(Boolean isBOM, Map<String, Map<String, Integer>> mapRefPath, String inputBom){
+        String bom = isBOM ? inputBom.substring(0, inputBom.length() - 3) : inputBom;
+
+        String bomPath = "";
+        if (mapRefPath.containsKey(bom)) {
+            Map<String, Integer> mapPathCount = mapRefPath.get(bom);
+            // Multiple path occurrences
+            if(mapPathCount.size() > 1){
+                bomPath =  "/Common/.Common";
+            }
+
+            // Just One path BUT...
+            if (mapPathCount.size() == 1){
+                for(Map.Entry<String, Integer> entry : mapPathCount.entrySet()){
+                    Integer count = entry.getValue();
+                    String path = entry.getKey().substring(1, entry.getKey().length());
+                    // Several ocurrences in same path
+                    if(count > 1){
+                        bomPath = "/" + StringUtils.capitalize(path) + "/.Common" ;
+                    } else {
+                        // Just one occurence, one path and BO name and path are the same
+                        if (bom.equals(StringUtils.capitalize(path))){
+                            bomPath = "/" + bom +  "/." + bom;
+                        } else {
+                            // Just one occurence, one path and BO name and path are NOT the same
+                            bomPath = "/" + StringUtils.capitalize(path) +  "/.Common";
+                        }
+                    }
+                }
+            }
+        } else {
+            // BO NOT mapped yet
+            bomPath = "/" + bom +  "/." + bom;
+        }
+        return bomPath;
+    }
+    public void addRefPath(Boolean isBOM, Map<String, Map<String, Integer>> mapRefPath, @NotNull String ref, @NotNull String path){
         // Register BOM 's path
         // Verify if tag exists in  mapRefPath
-        // Cleanning ref and turning in tag nad path into pathKey
+        // Cleanning ref and turning in tag and path into pathKey
         String tag1 = ref.substring(ref.lastIndexOf("/") + 1);
-        String tag = tag1.substring(0, tag1.length() - 3);
+        String tag = isBOM ? tag1.substring(0, tag1.length() - 3) : tag1.substring(0, tag1.length());
         String pathKey = "";
 
         if(path.indexOf("/", 1) == -1){
@@ -47,66 +84,223 @@ public class Generator {
             pathKey = path.substring(0,  path.indexOf("/", 1));
         }
 
-        if (this.mapRefPath.containsKey(tag)) {
+        if (mapRefPath.containsKey(tag)) {
             // Adds pathKey to existing tag
-            if(this.mapRefPath.get(tag).containsKey(pathKey)) {
+            // the BO is referenced in this tag
+            if(mapRefPath.get(tag).containsKey(pathKey)) {
                 // Update mapPath
-                Integer count = this.mapRefPath.get(tag).get(pathKey);
-                this.mapRefPath.get(tag).replace(pathKey, count + 1);
+                // the path was already registered but now referenced in deeper call/parameter etc
+                Integer count = mapRefPath.get(tag).get(pathKey);
+                mapRefPath.get(tag).replace(pathKey, count + 1);
             } else {
                 // Adds new pathKey to existing tag
-                this.mapRefPath.get(tag).put(pathKey, 1);
+                // Very first occurrence of BO in this path
+                mapRefPath.get(tag).put(pathKey, 1);
             }
         } else {
             // Create new mapPathCount for new tag
+            // BO referenced in path for first time in the API
             Map<String, Integer> mapPathCount = new HashMap<>();
             mapPathCount.put(pathKey, 1);
-            this.mapRefPath.put(tag, mapPathCount);
+            mapRefPath.put(tag, mapPathCount);
         }
     }
+    public void checkPathItem(@NotNull PathItem pathItem, String path){
+        // Loop over PathItem Parameters
+        List<Parameter> parameters = pathItem.getParameters();
+        if(parameters!=null){
+            this.loopOverParameters(parameters, path);
+        }
 
+        // Loop over PathItem Operations
+        List<Operation> operations = pathItem.readOperations();
+        if (operations!= null) {
+            this.loopOverOperations(operations, path);
+        }
+    }
     public void loopOverParameters(List<Parameter> parameters, String path) {
-        //List<Parameter> parameters = pathItem.getParameters();
         if (parameters != null) {
             for (Parameter parameter : parameters) {
-                if (parameter.get$ref() != null) {
+                // Has parameter ref?
+                if (parameter.get$ref()!=null) {
                     String ref = parameter.get$ref();
 
                     // Adds ref to path
-                    this.addRefPath(ref, path);
+                    this.addRefPath(true, this.mapRefPath, ref, path);
+                }
+                // Parameter has Content
+                Content content = parameter.getContent();
+                if (content!=null){
+                    this.checkContent(content, path);
+                }
+
+                // Has parameter Schema.?
+                Schema schema = parameter.getSchema();
+                if(schema!=null){
+                    // Send parameter name also
+                    String name = parameter.getName();
+                    this.checkSchema(schema, name, path);
+                }
+            }
+        }
+    }
+    public void loopOverOperations(@NotNull List<Operation> operations, String path){
+        for (Operation operation : operations) {
+            // Loop over Operation Parameters
+            List<Parameter> parameters = operation.getParameters();
+            if(parameters!=null){
+                this.loopOverParameters(parameters, path);
+            }
+
+            // Loop over Operation Request Body
+            RequestBody requestBody = operation.getRequestBody();
+            if(requestBody!=null){
+                Content content = requestBody.getContent();
+                if(content!=null){
+                    this.checkContent(content, path);
+                }
+            }
+
+            // Loop over Operation Responses
+            ApiResponses responses = operation.getResponses();
+            if (responses!= null) {
+                Collection<ApiResponse> responsesValues = responses.values();
+                for (ApiResponse response : responsesValues) {
+                    if (response.get$ref() != null) {
+                        String ref = response.get$ref();
+
+                        // Adds ref to path
+                        this.addRefPath(true, this.mapRefPath, ref, path);
+                    }
+
+                    Content content = response.getContent();
+                    if (content!=null){
+                        this.checkContent(content, path);
+                    }
+                }
+            }
+
+            // loop over Operation CallBacks
+            Map<String, Callback> callbackMap = operation.getCallbacks();
+            if(callbackMap!=null){
+                for(Callback callback : callbackMap.values()){
+                    Collection<PathItem> callbackPathItems = callback.values();
+                    if(callbackPathItems!=null){
+                        for(PathItem callbackPathItemEntry : callbackPathItems){
+                            this.checkPathItem(callbackPathItemEntry, path);
+                        }
+                    }
+
                 }
             }
         }
     }
 
-    public String getBOMPath(String tag){
-        String bom = tag.substring(0, tag.length() - 3);
+    public void checkContent(@NotNull Content content, String path) {
+        MediaType mediaType = content.get("application/json");
+        if (mediaType!=null && mediaType.getSchema()!=null){
+            Schema schema = mediaType.getSchema();
 
-        String bomPath = "";
-        if (this.mapRefPath.containsKey(bom)) {
-            Map<String, Integer> a = this.mapRefPath.get(bom);
-            if(a.size() > 1){
-                bomPath =  "/Common/.Common/";
+            if(schema!=null){
+                this.checkSchema(schema, "",path);
             }
-
-            if (a.size() == 1){
-                bomPath = "/Common/." + bom;
-            }
-        } else {
-            bomPath = "/" + bom +  "/." + bom;
         }
-        return bomPath;
+    }
+
+    public void checkSchema(@NotNull Schema schema, String name, String path) {
+        // schema has ref
+        String refSchema = schema.get$ref();
+        if (refSchema!= null) {
+            // Adds ref to path
+            this.addRefPath(true, this.mapRefPath, refSchema, path);
+        }
+
+        // Check if is a Definition Object Candidate
+        this.isDefinitionCandidate(schema, name, path);
+
+        // schema has properties
+        Map<String, Schema> properties = schema.getProperties();
+        if(properties!=null){
+            for(Map.Entry<String, Schema> entryProperty : properties.entrySet()){
+                Schema schemaEntryProperty = entryProperty.getValue();
+                String propertyName = entryProperty.getKey();
+
+                String ref = schemaEntryProperty.get$ref();
+                if(ref!=null){
+                    this.addRefPath(true, this.mapRefPath, ref, path);
+                }
+
+                // Check if property item is a Definition Object Candidate
+                this.isDefinitionCandidate(schemaEntryProperty, propertyName, path);
+            }
+        }
+
+        // schema has items
+        Schema items = schema.getItems();
+        if (items!= null){
+            String ref = items.get$ref();      // Consider to check further items type membership
+            if (ref!= null) {
+                // Adds ref to path
+                this.addRefPath(true, this.mapRefPath, ref, path);
+            }
+
+            // It has additional Properties.?  Double check this case
+            Schema additionalProperties = (Schema) items.getAdditionalProperties();
+            if(additionalProperties!=null){
+                this.checkSchema(additionalProperties, name, path);
+            }
+
+            // Check if item is a Definition Object Candidate
+            this.isDefinitionCandidate(items, name, path);
+        }
+    }
+
+    public void isDefinitionCandidate(@NotNull Schema schema, String name, String path) {
+        List enums = schema.getEnum();
+        if (enums!=null){
+            // Define schema as Definition Object or
+            // Register Definition Object ref in path
+            this.addRefPath(false, this.mapDefRefPath, name, path);
+        }
+    }
+
+    // Check where in Paths a BOM is referenced
+    // 1 and same Path returns own path
+    // 2 and same path returns bomPath/.Common
+    // otherwise returns Common/.Common
+
+    public void addBO(Boolean isBOM, String bom, Map.Entry<String,Schema> entry) {
+
+
+        if(isBOM){
+            String key = bom.substring(0, bom.length() - 3);
+            this.businessObjects.put(key, new BusinessObject());
+            // sets business object $uri
+            String bomPath = this.getBOMPath(true, this.mapRefPath, bom)  + ".bomml.boml";
+            this.businessObjects.get(key).setUri(bomPath);
+
+            // Adds classDescriptors
+            this.businessObjects.get(key).appendClassDescriptor(true, this, entry);
+        } else {
+            String key = bom;
+            key = key + "Def";
+            this.definitionObjects.put(key, new BusinessObject());
+            // sets definition object $uri
+            String bomDefPath = this.getBOMPath(false, this.mapDefRefPath, key)  + ".bomml.boml";
+            this.definitionObjects.get(key).setUri(bomDefPath);
+
+            // Adds classDescriptors
+            this.definitionObjects.get(key).appendClassDescriptor(false, this, entry);
+        }
     }
 
     @RequestMapping("/openapi")
-    public ResponseEntity<String> processOpenApiJson(@RequestBody String openApiJson) throws JsonProcessingException {
+    public ResponseEntity<String> processOpenApiJson(@org.springframework.web.bind.annotation.RequestBody String openApiJson) throws JsonProcessingException {
         // To proccess OpenAPI JSON
 
-        Map<String, BussinessObject> bussinessObjects = new HashMap<String, BussinessObject>();
+
         Paths paths = new Paths();
         Map<String, Schema> schemas = new HashMap<>();
-        // Schema schema = new Schema();
-        // PathItem user = new PathItem();
 
         OpenAPI openAPI = new OpenAPIV3Parser().readContents(openApiJson).getOpenAPI();
 
@@ -120,7 +314,6 @@ public class Generator {
         if (openAPI != null) {
             // Access to its compoments and schemas
 
-            List<Tag> tags = openAPI.getTags();
             schemas = openAPI.getComponents().getSchemas();
             paths = openAPI.getPaths();
 
@@ -129,257 +322,32 @@ public class Generator {
             for (String path : paths.keySet()) {
                 PathItem pathItem = paths.get(path);
 
-                // Loop over $ref in Parameters fill mapRefPath
-                this.loopOverParameters(pathItem.getParameters(), path);
-
-                // Loop over $ref in Operation fill mapRefPath
-                // Operations has tags !!!
-                List<Operation> operations = pathItem.readOperations();
-                if (operations!= null) {
-                    for (Operation operation : operations) {
-                        // Loop over Operations Parameters
-                        this.loopOverParameters(operation.getParameters(), path);
-
-                        // Loop over Operations Responses
-                        ApiResponses responses = operation.getResponses();
-                        if (responses!= null) {
-                            Collection<ApiResponse> responsesValues = responses.values();
-                            for (ApiResponse response : responsesValues) {
-                                if (response.get$ref() != null) {
-                                    String ref = response.get$ref();
-
-                                    // Adds ref to path
-                                    this.addRefPath(ref, path);
-                                }
-
-                                Content content = response.getContent();
-                                if (content!=null){
-                                    MediaType mediaType = content.get("application/json");
-                                    if (mediaType!=null && mediaType.getSchema()!=null){
-                                        String refContentSchema = mediaType.getSchema().get$ref();
-                                        if (refContentSchema!= null) {
-                                            // Adds ref to path
-                                            this.addRefPath(refContentSchema, path);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
+                this.checkPathItem(pathItem, path);
             }
             // ENDS Loop over ALL $REF
 
-            // Build Bussiness Object Array
-            // BussinessObject[] appolloAPI = new BussinessObject[];
+            // Build Business Object Array
+
             for (Map.Entry<String,Schema> entry : schemas.entrySet()){
 
                 String bom = entry.getKey();
-                String key = bom.substring(0, bom.length() - 3);
+                Schema schema = entry.getValue();
 
-                bussinessObjects.put(key, new BussinessObject());
-                String bomPath = this.getBOMPath(bom)  + ".bomml.boml";
-                bussinessObjects.get(key).setUri(bomPath);
-
+                List anEnum = schema.getEnum();
+                if(anEnum!=null){
+                    // Is a Def
+                    this.addBO(false, bom, entry);
+                } else {
+                    // BOM behavior
+                    this.addBO(true, bom, entry);
+                }
             }
-
-            // REVISAR TAGS
-            for (Tag tag : tags) {
-            //    String path = pathTarget + tag.getName().replace(" ", "");
-                BussinessObject bOject = new BussinessObject();
-            //    bOject.setUri(path);
-              //  bussinessObject.put(tag.getName(), bOject);
-            }
-
-            // user = paths.get("/user");
-
-            // schema = schemas.get(target); // openAPI.getComponents().getSchemas().get
-
-            //  bussinessObject.setUri(path + target + "/." + target + ".bomml.boml");
-            //  bussinessObject.setClassDescriptors(new ClassDescriptor[]{new ClassDescriptor(schema, path, target)});
-
-            // Processing the paths
-
-            // Processing the schemas
-
         }
 
         ObjectMapper objectMapper = new ObjectMapper();
-
-        // Convert Java object to JSON string
-       /* String outJSON = objectMapper.writeValueAsString(new BussinessObject[]{
-                bussinessObject,     // target Json
-               // bussinessObject      // Common Json
-        }); */
-        String outOpenJSON = objectMapper.writeValueAsString(openApiJson);
-
-        // Retorna el string JSON
-        return ResponseEntity.ok().body(objectMapper.writeValueAsString(mapRefPath));
+        // Return JSON string
+        return ResponseEntity.ok().body(objectMapper.writeValueAsString(this.definitionObjects));
     }
 
+
 }
-
-
-/*
-public ResponseEntity<String> processOpenApiJson(@RequestBody String openApiJson) throws JsonProcessingException {
-        // Aquí puedes procesar el JSON de OpenAPI como desees
-        // y retornar el contenido como JSON en pantalla
-
-        // Load tAPI = new OpenAPIV3Parser().readContents(openApiJson).getOpenAPI();
-
-        // Now you can work with the OpenAPI object
-        // For examhe OpenAPI JSON specification into an OpenAPI object
-        //        OpenAPI openple, you can access the components, schemas, paths, etc.
-
-        // Access to its compoments and schemas
-        Map<String, Schema> schemas =  openAPI.getComponents().getSchemas(); // openAPI.getPaths();
-        Paths paths =  openAPI.getPaths();
-
-
-
-
-
-          por cada Schema  de sus componentes iterar
-               Si item es Object
-                   - Crear directorio con nombre title
-                   - Crear dentro del directorio
-                        bomml.metadata ..........  {"artifactType":"BOM", "artifactSubtype":"DEFAULT"}
-                        bomml.i18.properties.....  {"title.userId":{"Description":{"en_US":""}, "Label":{"en_US":"User Id"}, "Placeholder":{"en_US":""}, "ToolTip":{"en_US":""}, "ErrorMessage":{"en_US":""}}}
-                        Si sus properties no contienen ref
-                            hacer file {
-                                   "$uri" = title/.title.bomml.boml
-                                   "classDescriptors":[
-                                        {
-                                            "objectClass": "true",
-                                            "$uri": "$uri" + #UserDto",
-                                            "title": title,
-                                            "properties": {
-                                                "profile": {
-                                                    "type": "ref",
-                                                    "order": 1,
-                                                    "ref": "title" + "/.Common.bomml.boml# + UserProfileDto" // capturar UserProfileDto
-                                                },
-                                                "credentials": {
-                                                    "type": "ref",
-                                                    "order": 2,
-                                                    "ref": "title" + "/.Common.bomml.boml# + UserCredentialsDto"
-                                                }
-                                            }
-                                        }
-                                   ]
-                                }
-                        Else
-                            - Crear directorio con nombre Common
-                              bomml.metadata ..........  {"artifactType":"BOM", "artifactSubtype":"DEFAULT"}
-                              bomml.i18.properties.....  {"title.userId":{"Description":{"en_US":""}, "Label":{"en_US":"User Id"}, "Placeholder":{"en_US":""}, "ToolTip":{"en_US":""}, "ErrorMessage":{"en_US":""}}}
-
-                            - Crear file Common.bomml.boml
-
-                            {
-                                "$uri": "Automation/Business Objects/Common/Integration/Camunda/User/.Common.bomml.boml",
-                                "classDescriptors": [
-                                    {
-                                        "objectClass": "true",
-                                        "$uri": "Automation/Business Objects/Common/Integration/Camunda/User/.Common.bomml.boml#UserCredentialsDto",
-                                        "title": "UserCredentialsDto",
-                                        "properties": {
-                                            "authenticatedUserPassword": {
-                                                "error": "",
-                                                "label": "Authentication User Password",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 1,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            },
-                                            "password": {
-                                                "error": "",
-                                                "label": "Password",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 0,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            }
-                                        }
-                                    },
-                                    {
-                                        "objectClass": "true",
-                                        "$uri": "Automation/Business Objects/Common/Integration/Camunda/User/.Common.bomml.boml#UserProfileDto",
-                                        "title": "UserProfileDto",
-                                        "properties": {
-                                            "id": {
-                                                "error": "",
-                                                "label": "ID",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 0,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            },
-                                            "firstName": {
-                                                "error": "",
-                                                "label": "First Name",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 1,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            },
-                                            "lastName": {
-                                                "error": "",
-                                                "label": "Last Name",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 2,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            },
-                                            "email": {
-                                                "error": "",
-                                                "label": "Email",
-                                                "icon": "{icon:'', color:'', before: false}",
-                                                "placeHolder": "",
-                                                "tooltip": "",
-                                                "type": "string",
-                                                "order": 3,
-                                                "access": "Input",
-                                                "formatDesc": {
-                                                    "formatType": "text"
-                                                }
-                                            }
-                                        }
-                                    }
-                                ]
-                            }
-
-
-
-
-
-    ObjectMapper objectMapper = new ObjectMapper();
-    String response = objectMapper.writeValueAsString(); //openAPI.getComponents().getSchemas()
-        return ResponseEntity.ok().body(response);
-                }
-       */

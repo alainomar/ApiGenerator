@@ -10,4 +10,8 @@ import lombok.*;
 @NoArgsConstructor
 public class FormatDescription {
     private String formatType;
+
+    public void FormatDescription(String formatType) {
+        this.formatType = formatType;
+    }
 }
